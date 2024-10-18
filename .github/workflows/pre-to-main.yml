@@ -1,0 +1,84 @@
+name: Deploy to PRE and create a pull request to merge to MAIN
+
+on:
+  push:
+    branches:
+      - pre
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_VERSION: '20.11.1'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }} 
+
+      - name: Set environment variables for PRE
+        run: |
+          echo "NEXT_PUBLIC_SOME_VAR=some_value" >> $GITHUB_ENV
+          # Add more lines if needed
+
+      - name: Create .env.local file
+        run: |
+          echo $GITHUB_ENV > .env.local
+
+      - name: Install dependencies
+        working-directory: ./project
+        run: npm install
+
+      - name: Compile
+        working-directory: ./project
+        run: npm run build
+
+      #Docker build for dev:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build Docker images for ${{ secrets.DOCKER_IMAGE }}
+        run: docker build . --tag ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_IMAGE }}:pre-latest
+
+      - name: Push Docker images for ${{ secrets.DOCKER_IMAGE }}
+        run: docker push ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_IMAGE }}:pre-latest
+
+      - name: Deploy via SSH to server
+        uses: appleboy/ssh-action@v0.1.9
+        with:
+          host: ${{ secrets.PRE_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            sudo docker-compose pull nextjs
+            sudo docker-compose up -d --force-recreate
+            sudo docker system prune -a -f
+
+  merge_to_prod:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.TOKEN_GITHUB }}
+
+    - name: Create Pull Request to MAIN
+      uses: repo-sync/pull-request@v2
+      with:
+        source_branch: "pre"
+        destination_branch: "main"
+        github_token: ${{ secrets.TOKEN_GITHUB }}
+        pr_title: "⚠️ Merge changes from PRE to MAIN ⚠️"
+        pr_body: "⚠️ New changes in PRE are ready to be merged into MAIN. ⚠️"

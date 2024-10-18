@@ -1,0 +1,268 @@
+---
+- hosts: all
+  become: yes
+  vars_files:
+    - vault.yml  # Includes the encrypted variables file
+    - "vars/{{ env }}.yml"  # This will dynamically load the correct environment file based on the passed environment
+
+  tasks:
+
+    # Update apt cache
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    # Install required dependencies
+    - name: Install required dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - openssl
+          - snapd
+        state: present
+
+    # Install Certbot using snapd
+    - name: Install Certbot
+      snap:
+        name: certbot
+        classic: yes
+
+    # Verify Certbot installation
+    - name: Verify Certbot is installed
+      command: certbot --version
+      register: certbot_version
+      failed_when: certbot_version.rc != 0
+      changed_when: false
+
+    - name: Show Certbot version
+      debug:
+        msg: "Certbot version is {{ certbot_version.stdout }}"
+
+    # Add official Docker GPG key
+    - name: Add official Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    # Add official Docker repository
+    - name: Add official Docker repository
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu focal stable
+        state: present
+
+    # Install Docker and Docker Compose
+    - name: Install Docker and Docker Compose
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+
+    # Ensure Docker is running and enabled
+    - name: Ensure Docker is running
+      systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    # Download Docker Compose from the official source
+    - name: Install Docker Compose
+      shell: |
+        curl -L "https://github.com/docker/compose/releases/download/$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        chmod +x /usr/local/bin/docker-compose
+
+    # Verify Docker installation
+    - name: Verify Docker installation
+      shell: docker --version
+      register: docker_version
+
+    # Verify Docker Compose installation
+    - name: Verify Docker Compose installation
+      shell: docker-compose --version
+      register: docker_compose_version
+
+    - name: Show Docker version
+      debug:
+        msg: "Docker version is {{ docker_version.stdout }}"
+
+    - name: Show Docker Compose version
+      debug:
+        msg: "Docker Compose version is {{ docker_compose_version.stdout }}"
+
+    # Log in to Docker using encrypted variables
+    - name: Log in to Docker
+      shell: |
+        docker login {{ docker_registry }} -u {{ docker_username }} -p {{ docker_login_token }}
+
+    # Create /opt/nginx directory
+    - name: Create /opt/nginx/ directory
+      file:
+        path: /opt/nginx/
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Create /var/www/certbot directory
+    - name: Create /var/www/certbot directory
+      file:
+        path: /var/www/certbot
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Ensure correct permissions for Certbot in /etc/letsencrypt
+    - name: Ensure correct permissions for Certbot in /etc/letsencrypt
+      file:
+        path: /etc/letsencrypt
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure correct permissions for Certbot in /var/lib/letsencrypt
+      file:
+        path: /var/lib/letsencrypt
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Obtain SSL certificates with Certbot
+    - name: Obtain SSL certificates with Certbot
+      shell: |
+        certbot certonly --standalone --agree-tos --no-eff-email --email {{ certbot_mail }} -d {{ domain_name }}
+      args:
+        creates: /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem
+
+    # Create nginx.conf file
+    - name: Create nginx.conf file
+      copy:
+        dest: /opt/nginx/nginx.conf
+        content: |
+          user  nginx;
+          worker_processes  auto;
+
+          events {
+              worker_connections 1024;
+          }
+
+          http {
+              server {
+                  listen 80;
+                  server_name {{ domain_name }};
+
+                  location /.well-known/acme-challenge/ {
+                      root /var/www/certbot;
+                  }
+
+                  location / {
+                      return 301 https://$host$request_uri;
+                  }
+              }
+
+              server {
+                  listen 443 ssl;
+                  server_name {{ domain_name }};
+
+                  # SSL certificates generated by Let's Encrypt
+                  ssl_certificate /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem;
+                  ssl_certificate_key /etc/letsencrypt/live/{{ domain_name }}/privkey.pem;
+
+                  ssl_protocols TLSv1.2 TLSv1.3;
+                  ssl_prefer_server_ciphers on;
+                  ssl_dhparam /etc/nginx/dhparam.pem;
+
+                  location / {
+                      proxy_pass http://nextjs:3000;
+                      proxy_http_version 1.1;
+                      proxy_set_header Upgrade $http_upgrade;
+                      proxy_set_header Connection 'upgrade';
+                      proxy_set_header Host $host;
+                      proxy_cache_bypass $http_upgrade;
+                  }
+              }
+          }
+
+    # Create docker-compose.yml file
+    - name: Create docker-compose.yml file
+      copy:
+        dest: /opt/docker-compose.yml
+        content: |
+          version: '3.8'
+  
+          services:
+            nextjs:
+              image: {{ docker_registry }}/{{ docker_image }}:{{ docker_image_tag }}
+              ports:
+                - "3000:3000"
+              environment:
+                - NODE_ENV={{ env_name }}
+              restart: unless-stopped
+  
+            nginx:
+              image: nginx:latest
+              depends_on:
+                - nextjs
+              volumes:
+                - /opt/nginx/nginx.conf:/etc/nginx/nginx.conf
+                - /etc/letsencrypt:/etc/letsencrypt  # SSL Certificates
+                - /var/lib/letsencrypt:/var/lib/letsencrypt  # SSL Data
+                - /etc/nginx/dhparam.pem:/etc/nginx/dhparam.pem
+              ports:
+                - "80:80"
+                - "443:443"
+              restart: unless-stopped
+              
+            certbot:
+              image: certbot/certbot
+              depends_on:
+                - nginx
+              volumes:
+                - /etc/letsencrypt:/etc/letsencrypt
+                - /var/lib/letsencrypt:/var/lib/letsencrypt
+              entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+    # Create /etc/nginx directory if it does not exist
+    - name: Create /etc/nginx directory if it does not exist
+      file:
+        path: /etc/nginx
+        state: directory
+        mode: '0755'
+
+    # Generate dhparam.pem file for Nginx
+    - name: Generate dhparam.pem file for Nginx
+      shell: |
+        openssl dhparam -out /etc/nginx/dhparam.pem 2048
+      args:
+        creates: /etc/nginx/dhparam.pem
+
+    # Check if port 80 is in use
+    - name: Check if port 80 is in use
+      shell: |
+        lsof -i :80 | grep LISTEN || true
+      register: port_80_check
+      ignore_errors: yes
+
+    # Stop services using port 80 if necessary
+    - name: Stop services using port 80 (if necessary)
+      shell: |
+        systemctl stop nginx || docker stop $(docker ps -q --filter "publish=80")
+      when: port_80_check.stdout != ''
+
+    # Redeploy containers if they are already running
+    - name: Redeploy containers if they are already running
+      ignore_errors: yes
+      shell: |
+        docker-compose -f /opt/docker-compose.yml pull
+        docker-compose -f /opt/docker-compose.yml up -d --force-recreate
+
+    # Optionally, remove all unused images, not just dangling ones
+    - name: Remove unused images
+      shell: docker system prune -a -f

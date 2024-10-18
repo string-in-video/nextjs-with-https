@@ -1,0 +1,16 @@
+#This variable file is used to define the variables for the pre environment inside the docker container.
+env_name: "prod"
+domain_name: "your_domain.com"
+
+# If you change the docker_image_tag, you will need to change the tag in the .github/workflows/deploy-main.yml file
+docker_image_tag: "latest"
+
+# Specify the email you want to use for the SSL certificate
+certbot_mail: admin@your_domain.com
+
+# This var needs to be the same as the secret in the .github/workflows/deploy-main.yml file
+docker_image: test-front
+
+# This var needs to be the same as the secret in the .github/workflows/deploy-main.yml file
+docker_registry: "rg.fr-par.scw.cloud/yourproject"
+

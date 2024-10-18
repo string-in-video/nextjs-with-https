@@ -1,0 +1,4 @@
+#Scaleway example you can change the values to match your provider
+docker_registry: "rg.fr-par.scw.cloud/yourproject"
+docker_username: "nologin"
+docker_login_token: "your_token"

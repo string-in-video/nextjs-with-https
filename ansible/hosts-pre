@@ -1,0 +1,5 @@
+[scaleway]
+#pre
+# If your ssh key is not in the default location, you can specify it here
+#Change your YOUR_PRE_SERVER_IP to your server IP like 8.8.8.8
+YOUR_PRE_SERVER_IP ansible_user=root ansible_ssh_private_key_file=~/.ssh/id_rsa
